@@ -1,0 +1,53 @@
+name: Build & Test
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+
+      - name: Download dependencies
+        run: go mod tidy
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Run tests
+        run: go test -v
+
+      - name: Build
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          xcaddy build \
+              --with github.com/mietzen/caddy-dns-opnsense \
+              --with github.com/mietzen/libdns-opnsense-dnsmasq=. \
+              --with github.com/mietzen/libdns-opnsense-unbound \
+              --with github.com/mholt/caddy-dynamicdns
