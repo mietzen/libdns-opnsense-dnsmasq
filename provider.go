@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/libdns/libdns"
+	"go.uber.org/zap"
 )
 
 // Provider facilitates DNS record manipulation with OPNsense Dnsmasq.
@@ -33,6 +34,9 @@ type Provider struct {
 	Insecure bool `json:"insecure,omitempty"`
 	// Description is set on created host entries (defaults to "Managed by Caddy")
 	Description string `json:"description,omitempty"`
+	// Logger is an optional logger. If set, warnings will be logged using this logger.
+	// When used with Caddy, set this to ctx.Logger() during Provision to match Caddy's log format.
+	Logger *zap.Logger `json:"-"`
 
 	client     *http.Client
 	clientOnce sync.Once
@@ -92,6 +96,13 @@ func (p *Provider) getDescription() string {
 	return "Managed by Caddy"
 }
 
+func (p *Provider) getLogger() *zap.Logger {
+	if p.Logger != nil {
+		return p.Logger
+	}
+	return zap.NewNop()
+}
+
 func (p *Provider) baseURL() string {
 	return fmt.Sprintf("https://%s/api/dnsmasq", p.Host)
 }
@@ -141,6 +152,19 @@ func (p *Provider) searchHosts(ctx context.Context) ([]dnsmasqHost, error) {
 }
 
 func (p *Provider) addHost(ctx context.Context, host, domain, ip string) error {
+	// Determine record type from IP for logging
+	addr, _ := netip.ParseAddr(ip)
+	rr := "A"
+	if addr.Is6() {
+		rr = "AAAA"
+	}
+
+	p.getLogger().Debug("adding host",
+		zap.String("host", host),
+		zap.String("domain", domain),
+		zap.String("type", rr),
+		zap.String("ip", ip))
+
 	reqData := addHostRequest{
 		Host: addHostData{
 			Host:   host,
@@ -173,6 +197,8 @@ func (p *Provider) addHost(ctx context.Context, host, domain, ip string) error {
 }
 
 func (p *Provider) deleteHost(ctx context.Context, uuid string) error {
+	p.getLogger().Debug("deleting host", zap.String("uuid", uuid))
+
 	respBody, err := p.doRequest(ctx, http.MethodPost, "settings/del_host/"+uuid, nil)
 	if err != nil {
 		return err
@@ -191,6 +217,8 @@ func (p *Provider) deleteHost(ctx context.Context, uuid string) error {
 }
 
 func (p *Provider) reconfigure(ctx context.Context) error {
+	p.getLogger().Debug("reconfiguring dnsmasq service")
+
 	respBody, err := p.doRequest(ctx, http.MethodPost, "service/reconfigure", nil)
 	if err != nil {
 		return err
@@ -205,6 +233,7 @@ func (p *Provider) reconfigure(ctx context.Context) error {
 		return fmt.Errorf("failed to reconfigure: %s", result.Message)
 	}
 
+	p.getLogger().Info("dnsmasq service reconfigured")
 	return nil
 }
 
@@ -245,6 +274,8 @@ func hostToRecord(h dnsmasqHost) (libdns.Address, error) {
 
 // GetRecords lists all the records in the zone.
 func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
+	p.getLogger().Debug("getting records", zap.String("zone", zone))
+
 	hosts, err := p.searchHosts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("searching hosts: %w", err)
@@ -271,17 +302,37 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 			continue // skip invalid entries
 		}
 
+		// Determine record type for logging
+		rr := "A"
+		if ip.Is6() {
+			rr = "AAAA"
+		}
+
+		p.getLogger().Debug("found DNS record",
+			zap.String("type", rr),
+			zap.String("name", name),
+			zap.String("zone", zone),
+			zap.String("value", ip.String()))
+
 		records = append(records, libdns.Address{
 			Name: name,
 			IP:   ip,
 		})
 	}
 
+	p.getLogger().Debug("finished getting records",
+		zap.String("zone", zone),
+		zap.Int("count", len(records)))
+
 	return records, nil
 }
 
 // AppendRecords adds records to the zone. It returns the records that were added.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	p.getLogger().Debug("appending records",
+		zap.String("zone", zone),
+		zap.Int("count", len(records)))
+
 	var added []libdns.Record
 
 	for _, record := range records {
@@ -300,6 +351,13 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 
 		// Get the relative name (hostname part) and resolve host/domain for dnsmasq
 		name := libdns.RelativeName(rr.Name, zone)
+
+		p.getLogger().Info("appending DNS record",
+			zap.String("zone", zone),
+			zap.String("name", name),
+			zap.String("type", rr.Type),
+			zap.String("ip", ip.String()))
+
 		host, domain := resolveHostAndDomain(name, zone)
 
 		if err := p.addHost(ctx, host, domain, ip.String()); err != nil {
@@ -324,6 +382,10 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 // SetRecords sets the records in the zone, either by updating existing records or creating new ones.
 // It returns the updated records.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	p.getLogger().Debug("setting records",
+		zap.String("zone", zone),
+		zap.Int("count", len(records)))
+
 	// Get existing hosts
 	existingHosts, err := p.searchHosts(ctx)
 	if err != nil {
@@ -363,6 +425,11 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			// Check if it's identical
 			if existing.IP == ip.String() && existing.Descr == p.getDescription() {
 				// Already correct, no changes needed
+				p.getLogger().Debug("record already up to date",
+					zap.String("zone", zone),
+					zap.String("name", name),
+					zap.String("type", rr.Type),
+					zap.String("ip", ip.String()))
 				results = append(results, libdns.Address{
 					Name: name,
 					IP:   ip,
@@ -371,10 +438,22 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			}
 
 			// Delete the old entry
+			p.getLogger().Info("updating DNS record",
+				zap.String("zone", zone),
+				zap.String("name", name),
+				zap.String("type", rr.Type),
+				zap.String("old_ip", existing.IP),
+				zap.String("new_ip", ip.String()))
 			if err := p.deleteHost(ctx, existing.UUID); err != nil {
 				return results, fmt.Errorf("deleting existing host %q: %w", name, err)
 			}
 			needsReconfigure = true
+		} else {
+			p.getLogger().Info("creating DNS record",
+				zap.String("zone", zone),
+				zap.String("name", name),
+				zap.String("type", rr.Type),
+				zap.String("ip", ip.String()))
 		}
 
 		// Add the new entry
@@ -400,6 +479,10 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 // DeleteRecords deletes the specified records from the zone. It returns the records that were deleted.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	p.getLogger().Debug("deleting records",
+		zap.String("zone", zone),
+		zap.Int("count", len(records)))
+
 	// Get existing hosts
 	existingHosts, err := p.searchHosts(ctx)
 	if err != nil {
@@ -423,8 +506,16 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []lib
 
 		existing, ok := existingByKey[key]
 		if !ok {
+			p.getLogger().Debug("record not found, skipping delete",
+				zap.String("zone", zone),
+				zap.String("name", name))
 			continue // record doesn't exist, nothing to delete
 		}
+
+		p.getLogger().Info("deleting DNS record",
+			zap.String("zone", zone),
+			zap.String("name", name),
+			zap.String("ip", existing.IP))
 
 		if err := p.deleteHost(ctx, existing.UUID); err != nil {
 			return deleted, fmt.Errorf("deleting host %q: %w", name, err)
