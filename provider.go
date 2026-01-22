@@ -213,6 +213,23 @@ func trimZone(zone string) string {
 	return strings.TrimSuffix(zone, ".")
 }
 
+// resolveHostAndDomain handles the special case where name is "@" (zone apex).
+// For dnsmasq, we need to split the zone into host and domain parts.
+// e.g., zone "my_domain.com" with name "@" becomes host "my_domain" and domain "com"
+func resolveHostAndDomain(name, zone string) (host, domain string) {
+	zone = trimZone(zone)
+	if name == "@" || name == "" {
+		// Zone apex: split the zone at the first dot
+		if idx := strings.Index(zone, "."); idx > 0 {
+			return zone[:idx], zone[idx+1:]
+		}
+		// No dot in zone, use zone as host with empty domain (edge case)
+		return zone, ""
+	}
+	// Normal subdomain
+	return name, zone
+}
+
 // hostToRecord converts a dnsmasqHost to a libdns.Address record
 func hostToRecord(h dnsmasqHost) (libdns.Address, error) {
 	ip, err := netip.ParseAddr(h.IP)
@@ -233,19 +250,31 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 		return nil, fmt.Errorf("searching hosts: %w", err)
 	}
 
-	domain := trimZone(zone)
+	zone = trimZone(zone)
 	var records []libdns.Record
 
 	for _, h := range hosts {
-		if h.Domain != domain {
-			continue
+		var name string
+
+		if h.Domain == zone {
+			// Normal subdomain: host "example" in domain "my_domain.com"
+			name = h.Host
+		} else if h.Host+"."+h.Domain == zone {
+			// Apex record: host "my_domain" in domain "com" for zone "my_domain.com"
+			name = "@"
+		} else {
+			continue // not part of this zone
 		}
 
-		addr, err := hostToRecord(h)
+		ip, err := netip.ParseAddr(h.IP)
 		if err != nil {
 			continue // skip invalid entries
 		}
-		records = append(records, addr)
+
+		records = append(records, libdns.Address{
+			Name: name,
+			IP:   ip,
+		})
 	}
 
 	return records, nil
@@ -253,7 +282,6 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 
 // AppendRecords adds records to the zone. It returns the records that were added.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
-	domain := trimZone(zone)
 	var added []libdns.Record
 
 	for _, record := range records {
@@ -270,10 +298,11 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 			return added, fmt.Errorf("invalid IP address %q: %w", rr.Data, err)
 		}
 
-		// Get the relative name (hostname part)
+		// Get the relative name (hostname part) and resolve host/domain for dnsmasq
 		name := libdns.RelativeName(rr.Name, zone)
+		host, domain := resolveHostAndDomain(name, zone)
 
-		if err := p.addHost(ctx, name, domain, ip.String()); err != nil {
+		if err := p.addHost(ctx, host, domain, ip.String()); err != nil {
 			return added, fmt.Errorf("adding host %q: %w", name, err)
 		}
 
@@ -295,20 +324,17 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 // SetRecords sets the records in the zone, either by updating existing records or creating new ones.
 // It returns the updated records.
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
-	domain := trimZone(zone)
-
 	// Get existing hosts
 	existingHosts, err := p.searchHosts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("searching hosts: %w", err)
 	}
 
-	// Build a map of existing hosts by name for this domain
-	existingByName := make(map[string]dnsmasqHost)
+	// Build a map of existing hosts by host:domain key
+	existingByKey := make(map[string]dnsmasqHost)
 	for _, h := range existingHosts {
-		if h.Domain == domain {
-			existingByName[h.Host] = h
-		}
+		key := h.Host + ":" + h.Domain
+		existingByKey[key] = h
 	}
 
 	var results []libdns.Record
@@ -329,9 +355,11 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		}
 
 		name := libdns.RelativeName(rr.Name, zone)
+		host, domain := resolveHostAndDomain(name, zone)
+		key := host + ":" + domain
 
 		// Check if an entry already exists
-		if existing, ok := existingByName[name]; ok {
+		if existing, ok := existingByKey[key]; ok {
 			// Check if it's identical
 			if existing.IP == ip.String() && existing.Descr == p.getDescription() {
 				// Already correct, no changes needed
@@ -350,7 +378,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		}
 
 		// Add the new entry
-		if err := p.addHost(ctx, name, domain, ip.String()); err != nil {
+		if err := p.addHost(ctx, host, domain, ip.String()); err != nil {
 			return results, fmt.Errorf("adding host %q: %w", name, err)
 		}
 		needsReconfigure = true
@@ -372,20 +400,17 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 // DeleteRecords deletes the specified records from the zone. It returns the records that were deleted.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
-	domain := trimZone(zone)
-
 	// Get existing hosts
 	existingHosts, err := p.searchHosts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("searching hosts: %w", err)
 	}
 
-	// Build a map of existing hosts by name for this domain
-	existingByName := make(map[string]dnsmasqHost)
+	// Build a map of existing hosts by host:domain key
+	existingByKey := make(map[string]dnsmasqHost)
 	for _, h := range existingHosts {
-		if h.Domain == domain {
-			existingByName[h.Host] = h
-		}
+		key := h.Host + ":" + h.Domain
+		existingByKey[key] = h
 	}
 
 	var deleted []libdns.Record
@@ -393,8 +418,10 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []lib
 	for _, record := range records {
 		rr := record.RR()
 		name := libdns.RelativeName(rr.Name, zone)
+		host, domain := resolveHostAndDomain(name, zone)
+		key := host + ":" + domain
 
-		existing, ok := existingByName[name]
+		existing, ok := existingByKey[key]
 		if !ok {
 			continue // record doesn't exist, nothing to delete
 		}
