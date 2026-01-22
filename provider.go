@@ -123,7 +123,7 @@ func (p *Provider) doRequest(ctx context.Context, method, endpoint string, body 
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -447,7 +447,6 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			if err := p.deleteHost(ctx, existing.UUID); err != nil {
 				return results, fmt.Errorf("deleting existing host %q: %w", name, err)
 			}
-			needsReconfigure = true
 		} else {
 			p.getLogger().Info("creating DNS record",
 				zap.String("zone", zone),

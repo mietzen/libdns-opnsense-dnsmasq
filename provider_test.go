@@ -176,7 +176,7 @@ func TestGetRecords(t *testing.T) {
 				}
 
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(tt.serverResponse)
+				_ = json.NewEncoder(w).Encode(tt.serverResponse)
 			})
 			defer server.Close()
 
@@ -260,12 +260,12 @@ func TestAppendRecords(t *testing.T) {
 
 				if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/add_host") {
 					addCount++
-					json.NewEncoder(w).Encode(apiResponse{Result: "saved"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Result: "saved"})
 					return
 				}
 				if r.URL.Path == "/api/dnsmasq/service/reconfigure" {
 					reconfigured = true
-					json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
 					return
 				}
 				t.Errorf("unexpected path: %s", r.URL.Path)
@@ -353,17 +353,17 @@ func TestDeleteRecords(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 
 				if r.URL.Path == "/api/dnsmasq/settings/search_host" {
-					json.NewEncoder(w).Encode(searchHostResponse{Rows: tt.existingHosts})
+					_ = json.NewEncoder(w).Encode(searchHostResponse{Rows: tt.existingHosts})
 					return
 				}
 				if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/del_host/") {
 					deleteCount++
-					json.NewEncoder(w).Encode(apiResponse{Result: "deleted"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Result: "deleted"})
 					return
 				}
 				if r.URL.Path == "/api/dnsmasq/service/reconfigure" {
 					reconfigured = true
-					json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
 					return
 				}
 				t.Errorf("unexpected path: %s", r.URL.Path)
@@ -446,22 +446,22 @@ func TestSetRecords(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 
 				if r.URL.Path == "/api/dnsmasq/settings/search_host" {
-					json.NewEncoder(w).Encode(searchHostResponse{Rows: tt.existingHosts})
+					_ = json.NewEncoder(w).Encode(searchHostResponse{Rows: tt.existingHosts})
 					return
 				}
 				if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/add_host") {
 					addCount++
-					json.NewEncoder(w).Encode(apiResponse{Result: "saved"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Result: "saved"})
 					return
 				}
 				if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/del_host/") {
 					deleteCount++
-					json.NewEncoder(w).Encode(apiResponse{Result: "deleted"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Result: "deleted"})
 					return
 				}
 				if r.URL.Path == "/api/dnsmasq/service/reconfigure" {
 					reconfigured = true
-					json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
+					_ = json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
 					return
 				}
 				t.Errorf("unexpected path: %s", r.URL.Path)
@@ -508,7 +508,7 @@ func TestAPIErrorHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
-				w.Write([]byte(tt.response))
+				_, _ = w.Write([]byte(tt.response))
 			})
 			defer server.Close()
 
