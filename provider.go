@@ -22,6 +22,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// DefaultCleanupDelay is the default delay before orphan cleanup runs
+const DefaultCleanupDelay = 5 * time.Second
+
 // Provider facilitates DNS record manipulation with OPNsense Dnsmasq.
 type Provider struct {
 	// Host is the OPNsense hostname or IP address (e.g., "opnsense.example.com" or "192.168.1.1")
@@ -34,12 +37,20 @@ type Provider struct {
 	Insecure bool `json:"insecure,omitempty"`
 	// Description is set on created host entries (defaults to "Managed by Caddy")
 	Description string `json:"description,omitempty"`
+	// CleanupDelay is the delay after last SetRecords before orphan cleanup runs (default 5s)
+	CleanupDelay time.Duration `json:"cleanup_delay,omitempty"`
 	// Logger is an optional logger. If set, warnings will be logged using this logger.
 	// When used with Caddy, set this to ctx.Logger() during Provision to match Caddy's log format.
 	Logger *zap.Logger `json:"-"`
 
 	client     *http.Client
 	clientOnce sync.Once
+
+	// Sync tracking for orphan cleanup
+	syncMu         sync.Mutex
+	syncTimer      *time.Timer
+	managedRecords map[string]struct{} // key: "host:domain"
+	syncZones      map[string]struct{} // zones touched this session
 }
 
 // dnsmasqHost represents a host entry from the OPNsense Dnsmasq API
@@ -237,6 +248,114 @@ func (p *Provider) reconfigure(ctx context.Context) error {
 	return nil
 }
 
+// getCleanupDelay returns the cleanup delay, defaulting to DefaultCleanupDelay
+func (p *Provider) getCleanupDelay() time.Duration {
+	if p.CleanupDelay > 0 {
+		return p.CleanupDelay
+	}
+	return DefaultCleanupDelay
+}
+
+// trackManagedRecord marks a record as actively managed in the current session
+func (p *Provider) trackManagedRecord(host, domain string) {
+	p.syncMu.Lock()
+	defer p.syncMu.Unlock()
+
+	if p.managedRecords == nil {
+		p.managedRecords = make(map[string]struct{})
+	}
+	if p.syncZones == nil {
+		p.syncZones = make(map[string]struct{})
+	}
+
+	key := host + ":" + domain
+	p.managedRecords[key] = struct{}{}
+	p.syncZones[domain] = struct{}{}
+}
+
+// startCleanupTimer starts or resets the debounced cleanup timer
+func (p *Provider) startCleanupTimer() {
+	p.syncMu.Lock()
+	defer p.syncMu.Unlock()
+
+	// Stop existing timer if running
+	if p.syncTimer != nil {
+		p.syncTimer.Stop()
+	}
+
+	// Start new timer
+	p.syncTimer = time.AfterFunc(p.getCleanupDelay(), func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		p.cleanupOrphanedRecords(ctx)
+	})
+}
+
+// cleanupOrphanedRecords deletes records that have our description but weren't touched this session
+func (p *Provider) cleanupOrphanedRecords(ctx context.Context) {
+	p.syncMu.Lock()
+	zones := p.syncZones
+	managed := p.managedRecords
+	// Reset tracking for next session
+	p.syncZones = make(map[string]struct{})
+	p.managedRecords = make(map[string]struct{})
+	p.syncMu.Unlock()
+
+	if len(zones) == 0 {
+		return
+	}
+
+	p.getLogger().Debug("starting orphan cleanup",
+		zap.Int("managed_records", len(managed)),
+		zap.Int("zones", len(zones)))
+
+	// Query all hosts
+	hosts, err := p.searchHosts(ctx)
+	if err != nil {
+		p.getLogger().Error("failed to search hosts for cleanup", zap.Error(err))
+		return
+	}
+
+	needsReconfigure := false
+	for _, h := range hosts {
+		// Skip if not our description
+		if h.Descr != p.getDescription() {
+			continue
+		}
+		// Skip if not in a touched zone
+		if _, ok := zones[h.Domain]; !ok {
+			continue
+		}
+		// Skip if record was managed this session
+		key := h.Host + ":" + h.Domain
+		if _, ok := managed[key]; ok {
+			continue
+		}
+
+		// Delete orphaned record
+		p.getLogger().Info("deleting orphaned DNS record",
+			zap.String("host", h.Host),
+			zap.String("domain", h.Domain),
+			zap.String("ip", h.IP))
+		if err := p.deleteHost(ctx, h.UUID); err != nil {
+			p.getLogger().Error("failed to delete orphaned host",
+				zap.String("host", h.Host),
+				zap.String("domain", h.Domain),
+				zap.Error(err))
+			continue
+		}
+		needsReconfigure = true
+	}
+
+	if needsReconfigure {
+		if err := p.reconfigure(ctx); err != nil {
+			p.getLogger().Error("failed to reconfigure after cleanup", zap.Error(err))
+		}
+	}
+
+	p.getLogger().Debug("orphan cleanup completed")
+}
+
 // trimZone removes the trailing dot from a zone name
 func trimZone(zone string) string {
 	return strings.TrimSuffix(zone, ".")
@@ -420,6 +539,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 		host, domain := resolveHostAndDomain(name, zone)
 		key := host + ":" + domain
 
+		// Track this record as managed for orphan cleanup
+		p.trackManagedRecord(host, domain)
+
 		// Check if an entry already exists
 		if existing, ok := existingByKey[key]; ok {
 			// Check if it's identical
@@ -472,6 +594,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 			return results, fmt.Errorf("reconfiguring: %w", err)
 		}
 	}
+
+	// Start cleanup timer (will be reset if more SetRecords calls come in)
+	p.startCleanupTimer()
 
 	return results, nil
 }

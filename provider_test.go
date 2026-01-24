@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/libdns/libdns"
 )
@@ -524,6 +525,243 @@ func TestAPIErrorHandling(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetCleanupDelay(t *testing.T) {
+	tests := []struct {
+		name     string
+		delay    time.Duration
+		expected time.Duration
+	}{
+		{"custom delay", 10 * time.Second, 10 * time.Second},
+		{"zero delay uses default", 0, DefaultCleanupDelay},
+		{"negative delay uses default", -1 * time.Second, DefaultCleanupDelay},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Provider{CleanupDelay: tt.delay}
+			result := p.getCleanupDelay()
+			if result != tt.expected {
+				t.Errorf("getCleanupDelay() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTrackManagedRecord(t *testing.T) {
+	p := &Provider{}
+
+	// Track first record
+	p.trackManagedRecord("www", "example.com")
+
+	if len(p.managedRecords) != 1 {
+		t.Errorf("managedRecords has %d entries, want 1", len(p.managedRecords))
+	}
+	if _, ok := p.managedRecords["www:example.com"]; !ok {
+		t.Error("managedRecords missing 'www:example.com'")
+	}
+	if _, ok := p.syncZones["example.com"]; !ok {
+		t.Error("syncZones missing 'example.com'")
+	}
+
+	// Track second record in same zone
+	p.trackManagedRecord("api", "example.com")
+
+	if len(p.managedRecords) != 2 {
+		t.Errorf("managedRecords has %d entries, want 2", len(p.managedRecords))
+	}
+	if len(p.syncZones) != 1 {
+		t.Errorf("syncZones has %d entries, want 1", len(p.syncZones))
+	}
+
+	// Track record in different zone
+	p.trackManagedRecord("mail", "other.com")
+
+	if len(p.managedRecords) != 3 {
+		t.Errorf("managedRecords has %d entries, want 3", len(p.managedRecords))
+	}
+	if len(p.syncZones) != 2 {
+		t.Errorf("syncZones has %d entries, want 2", len(p.syncZones))
+	}
+}
+
+func TestCleanupOrphanedRecords(t *testing.T) {
+	tests := []struct {
+		name           string
+		existingHosts  []dnsmasqHost
+		managedRecords map[string]struct{}
+		syncZones      map[string]struct{}
+		expectDeleted  int
+	}{
+		{
+			name: "cleanup orphaned record",
+			existingHosts: []dnsmasqHost{
+				{UUID: "1", Host: "www", Domain: "example.com", IP: "192.168.1.1", Descr: "Managed by Caddy"},
+				{UUID: "2", Host: "api", Domain: "example.com", IP: "192.168.1.2", Descr: "Managed by Caddy"},
+				{UUID: "3", Host: "orphan", Domain: "example.com", IP: "192.168.1.3", Descr: "Managed by Caddy"},
+			},
+			managedRecords: map[string]struct{}{
+				"www:example.com": {},
+				"api:example.com": {},
+			},
+			syncZones:     map[string]struct{}{"example.com": {}},
+			expectDeleted: 1,
+		},
+		{
+			name: "skip records with different description",
+			existingHosts: []dnsmasqHost{
+				{UUID: "1", Host: "www", Domain: "example.com", IP: "192.168.1.1", Descr: "Managed by Caddy"},
+				{UUID: "2", Host: "manual", Domain: "example.com", IP: "192.168.1.2", Descr: "Manual Entry"},
+			},
+			managedRecords: map[string]struct{}{
+				"www:example.com": {},
+			},
+			syncZones:     map[string]struct{}{"example.com": {}},
+			expectDeleted: 0,
+		},
+		{
+			name: "skip records in untouched zones",
+			existingHosts: []dnsmasqHost{
+				{UUID: "1", Host: "www", Domain: "example.com", IP: "192.168.1.1", Descr: "Managed by Caddy"},
+				{UUID: "2", Host: "other", Domain: "other.com", IP: "192.168.1.2", Descr: "Managed by Caddy"},
+			},
+			managedRecords: map[string]struct{}{
+				"www:example.com": {},
+			},
+			syncZones:     map[string]struct{}{"example.com": {}},
+			expectDeleted: 0,
+		},
+		{
+			name: "no cleanup when no zones touched",
+			existingHosts: []dnsmasqHost{
+				{UUID: "1", Host: "orphan", Domain: "example.com", IP: "192.168.1.1", Descr: "Managed by Caddy"},
+			},
+			managedRecords: map[string]struct{}{},
+			syncZones:      map[string]struct{}{},
+			expectDeleted:  0,
+		},
+		{
+			name: "cleanup multiple orphans",
+			existingHosts: []dnsmasqHost{
+				{UUID: "1", Host: "www", Domain: "example.com", IP: "192.168.1.1", Descr: "Managed by Caddy"},
+				{UUID: "2", Host: "orphan1", Domain: "example.com", IP: "192.168.1.2", Descr: "Managed by Caddy"},
+				{UUID: "3", Host: "orphan2", Domain: "example.com", IP: "192.168.1.3", Descr: "Managed by Caddy"},
+			},
+			managedRecords: map[string]struct{}{
+				"www:example.com": {},
+			},
+			syncZones:     map[string]struct{}{"example.com": {}},
+			expectDeleted: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleteCount := 0
+			reconfigured := false
+
+			server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+
+				if r.URL.Path == "/api/dnsmasq/settings/search_host" {
+					_ = json.NewEncoder(w).Encode(searchHostResponse{Rows: tt.existingHosts})
+					return
+				}
+				if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/del_host/") {
+					deleteCount++
+					_ = json.NewEncoder(w).Encode(apiResponse{Result: "deleted"})
+					return
+				}
+				if r.URL.Path == "/api/dnsmasq/service/reconfigure" {
+					reconfigured = true
+					_ = json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
+					return
+				}
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			})
+			defer server.Close()
+
+			p := newTestProvider(t, server.URL)
+			p.managedRecords = tt.managedRecords
+			p.syncZones = tt.syncZones
+
+			p.cleanupOrphanedRecords(context.Background())
+
+			if deleteCount != tt.expectDeleted {
+				t.Errorf("deleted %d records, want %d", deleteCount, tt.expectDeleted)
+			}
+
+			if tt.expectDeleted > 0 && !reconfigured {
+				t.Error("reconfigure was not called")
+			}
+			if tt.expectDeleted == 0 && reconfigured {
+				t.Error("reconfigure was called unexpectedly")
+			}
+
+			// Verify tracking was reset
+			if len(p.managedRecords) != 0 {
+				t.Errorf("managedRecords not reset, has %d entries", len(p.managedRecords))
+			}
+			if len(p.syncZones) != 0 {
+				t.Errorf("syncZones not reset, has %d entries", len(p.syncZones))
+			}
+		})
+	}
+}
+
+func TestSetRecordsTracksRecords(t *testing.T) {
+	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Path == "/api/dnsmasq/settings/search_host" {
+			_ = json.NewEncoder(w).Encode(searchHostResponse{Rows: []dnsmasqHost{}})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/dnsmasq/settings/add_host") {
+			_ = json.NewEncoder(w).Encode(apiResponse{Result: "saved"})
+			return
+		}
+		if r.URL.Path == "/api/dnsmasq/service/reconfigure" {
+			_ = json.NewEncoder(w).Encode(apiResponse{Status: "ok"})
+			return
+		}
+	})
+	defer server.Close()
+
+	p := newTestProvider(t, server.URL)
+	p.CleanupDelay = 1 * time.Hour // Long delay so timer doesn't fire during test
+
+	records := []libdns.Record{
+		libdns.Address{Name: "www", IP: mustParseAddr("192.168.1.1")},
+		libdns.Address{Name: "api", IP: mustParseAddr("192.168.1.2")},
+	}
+
+	_, err := p.SetRecords(context.Background(), "example.com", records)
+	if err != nil {
+		t.Fatalf("SetRecords() error = %v", err)
+	}
+
+	// Verify records were tracked
+	if len(p.managedRecords) != 2 {
+		t.Errorf("managedRecords has %d entries, want 2", len(p.managedRecords))
+	}
+	if _, ok := p.managedRecords["www:example.com"]; !ok {
+		t.Error("managedRecords missing 'www:example.com'")
+	}
+	if _, ok := p.managedRecords["api:example.com"]; !ok {
+		t.Error("managedRecords missing 'api:example.com'")
+	}
+	if _, ok := p.syncZones["example.com"]; !ok {
+		t.Error("syncZones missing 'example.com'")
+	}
+
+	// Stop timer to clean up
+	p.syncMu.Lock()
+	if p.syncTimer != nil {
+		p.syncTimer.Stop()
+	}
+	p.syncMu.Unlock()
 }
 
 // Helper function for tests
