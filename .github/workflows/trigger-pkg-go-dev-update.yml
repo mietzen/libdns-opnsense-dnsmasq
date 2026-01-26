@@ -1,4 +1,4 @@
-name: Trigger a pkg.go.dev update
+name: Trigger a pkg.go.dev update & upstream repo
 
 on:
   workflow_dispatch:
@@ -10,4 +10,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Update pkg.go.dev
-        run: curl "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME,,}.info"
+        if: github.event_name == 'release'
+        run: |
+          curl "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME,,}.info"
+          sleep 10
+      - uses: actions/checkout@v6
+      - uses: actions/create-github-app-token@v2
+        id: generate-token
+        with:
+          app-id: ${{ secrets.DEPENDABOT_TRIGGER_APP_ID }}
+          private-key: ${{ secrets.DEPENDABOT_TRIGGER_APP_PRIVATE_KEY }}
+          repositories: caddy-dns-opnsense
+          permission-workflows: read
+      - name: Trigger upstream workflows
+        run: |
+          gh workflow run 'dependabot-trigger.yml' -R mietzen/caddy-dns-opnsense
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
