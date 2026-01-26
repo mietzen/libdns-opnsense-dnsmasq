@@ -21,7 +21,7 @@ jobs:
           app-id: ${{ secrets.DEPENDABOT_TRIGGER_APP_ID }}
           private-key: ${{ secrets.DEPENDABOT_TRIGGER_APP_PRIVATE_KEY }}
           repositories: caddy-dns-opnsense
-          permission-workflows: read
+          # permission-actions: read
       - name: Trigger upstream workflows
         run: |
           gh workflow run 'dependabot-trigger.yml' -R mietzen/caddy-dns-opnsense
