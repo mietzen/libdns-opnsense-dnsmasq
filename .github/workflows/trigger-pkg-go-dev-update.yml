@@ -14,7 +14,6 @@ jobs:
         run: |
           curl "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME,,}.info"
           sleep 10
-      - uses: actions/checkout@v6
       - uses: actions/create-github-app-token@v2
         id: generate-token
         with:
@@ -23,7 +22,13 @@ jobs:
           repositories: caddy-dns-opnsense
           # permission-actions: read
       - name: Trigger upstream workflows
-        run: |
-          gh workflow run 'dependabot-trigger.yml' -R mietzen/caddy-dns-opnsense
-        env:
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ steps.generate-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'mietzen',
+              repo: 'caddy-dns-opnsense',
+              workflow_id: 'dependabot-trigger.yml',
+              ref: 'master'
+            })
