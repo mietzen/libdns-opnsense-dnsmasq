@@ -17,8 +17,8 @@ jobs:
       - uses: actions/create-github-app-token@v2
         id: generate-token
         with:
-          app-id: ${{ secrets.DEPENDABOT_TRIGGER_APP_ID }}
-          private-key: ${{ secrets.DEPENDABOT_TRIGGER_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.ACTION_TRIGGER_APP_ID }}
+          private-key: ${{ secrets.ACTION_TRIGGER_APP_PRIVATE_KEY }}
           repositories: caddy-dns-opnsense
           permission-actions: write
       - name: Trigger upstream workflows
