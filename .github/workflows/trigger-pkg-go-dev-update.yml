@@ -22,7 +22,7 @@ jobs:
           repositories: caddy-dns-opnsense
           permission-actions: write
       - name: Trigger upstream workflows
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           github-token: ${{ steps.generate-token.outputs.token }}
           script: |
