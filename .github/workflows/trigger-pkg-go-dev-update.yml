@@ -14,7 +14,7 @@ jobs:
         run: |
           curl "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME,,}.info"
           sleep 10
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: generate-token
         with:
           app-id: ${{ secrets.ACTION_TRIGGER_APP_ID }}
