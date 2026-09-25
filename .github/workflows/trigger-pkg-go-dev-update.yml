@@ -7,7 +7,7 @@ on:
 
 jobs:
   update-pkg-go-dev:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Update pkg.go.dev
         if: github.event_name == 'release'
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: generate-token
         with:
-          app-id: ${{ secrets.ACTION_TRIGGER_APP_ID }}
+          client-id: ${{ secrets.ACTION_TRIGGER_APP_ID }}
           private-key: ${{ secrets.ACTION_TRIGGER_APP_PRIVATE_KEY }}
           repositories: caddy-dns-opnsense
           permission-actions: write
